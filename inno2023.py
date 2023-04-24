@@ -24,7 +24,7 @@ ROBOT = not SIMULATOR
 auv = mur.mur_init()
 time_new = 0
 
-DEPTH = 2
+DEPTH = 2.5
 
 if SIMULATOR:
     THRUSTER_DEPTH_LEFT = 2
@@ -36,6 +36,11 @@ if SIMULATOR:
     DIRECTION_THRUSTER_DEPTH_RIGHT = +1
     DIRECTION_THRUSTER_YAW_LEFT = +1
     DIRECTION_THRUSTER_YAW_RIGHT = +1
+
+    Kp_depth = 150  # кофецент пропорционального регулятора на глубину
+    Kd_depth = 200  # кофецент дифференциального регулятора на глубину
+    Kp_yaw = 1   # кофецент пропорционального регулятора на курс
+    Kd_yaw = 0.001  # кофецент дифференциального регулятора на курс
 
 else:
     THRUSTER_DEPTH_LEFT = 0
@@ -53,6 +58,11 @@ else:
 
     mur_view = auv.get_videoserver()
 
+    Kp_depth = 150  # кофецент пропорционального регулятора на глубину
+    Kd_depth = 20  # кофецент дифференциального регулятора на глубину
+    Kp_yaw = 0.3  # кофецент пропорционального регулятора на курс
+    Kd_yaw = 1  # кофецент дифференциального регулятора на курс
+
 Low_hsv_black = (0, 0, 0)
 Max_hsv_black = (180, 30, 255)
 Low_hsv_orange = (0, 10, 10)
@@ -60,10 +70,8 @@ Max_hsv_orange = (70, 255, 255)
 # Low_hsw_orange = (30, 10, 15)
 # Max_hsv_orange = (119, 182, 255)
 
-Kp_depth = 150  # кофецент пропорционального регулятора на глубину
-Kd_depth = 20  # кофецент дифференциального регулятора на глубину
-Kp_yaw = 0.3  # кофецент пропорционального регулятора на курс
-Kd_yaw = 1  # кофецент дифференциального регулятора на курс
+IMAGE_CENTER_X = 320 // 2
+IMAGE_CENTER_Y = 240 // 2
 
 colors_dict = {
     'red': ((160, 50, 50), (180, 255, 255)),
@@ -121,7 +129,7 @@ def get_depth_correction(k=1):
 
 
 def angle_correct(angle):
-    return angle + int(auv.get_yaw())
+    return clamp_to180(angle + auv.get_yaw())
 
 
 def calculate_angle_sin_vector(x1, y1):
@@ -150,13 +158,14 @@ def calculate_angle_cos(x1, y1):
 
 
 def calculate_angle(x1, y1):
-    angle_ = calculate_angle_cos(x1, y1)
-    angle = calculate_angle_sin_vector(x1, y1)
-    try:
-        angle = angle_ * (angle / abs(angle))
-    except ZeroDivisionError:
-        pass
-    return int(angle)
+    # angle_ = calculate_angle_cos(x1, y1)
+    # angle = calculate_angle_sin_vector(x1, y1)
+    # try:
+    #     angle = angle_ * (angle / abs(angle))
+    # except ZeroDivisionError:
+    #     pass
+    # return int(angle)
+    return math.degrees(math.atan2(IMAGE_CENTER_Y - y1, IMAGE_CENTER_X - x1))
 
 
 def stop_motors():
@@ -186,9 +195,9 @@ def keep_yaw(yaw_to_set, speed_to_yaw=0, error=...):
         output = keep_yaw.regulator.process(error)
         # проверяем выходное значение на ограничение
         output = clamp(output, 100, -100)
-        auv.set_motor_power(THRUSTER_YAW_LEFT, DIRECTION_THRUSTER_YAW_LEFT * clamp((speed_to_yaw - output), 100,
+        auv.set_motor_power(THRUSTER_YAW_LEFT, DIRECTION_THRUSTER_YAW_LEFT * clamp((speed_to_yaw + output), 100,
                                                                                    -100))  # передаём выходное значение на мотор 0
-        auv.set_motor_power(THRUSTER_YAW_RIGHT, DIRECTION_THRUSTER_YAW_RIGHT * clamp((speed_to_yaw + output), 100,
+        auv.set_motor_power(THRUSTER_YAW_RIGHT, DIRECTION_THRUSTER_YAW_RIGHT * clamp((speed_to_yaw - output), 100,
                                                                                      -100))  # передаём выходное значение на мотор 1
     except AttributeError:  # активируется при первом запуске, записываются кофиценты
         keep_yaw.regulator = PD()
@@ -218,7 +227,7 @@ def keep_depth(depth_to_set):
         keep_depth.regulator.set_d_gain(Kd_depth)  # запись дк на глубину
 
 
-def motor_control_regulator(time_control, yaw_to_set, depth_to_set, speed_to_yaw=0.0):
+def motor_control_regulator(time_control, yaw_to_set, depth_to_set, speed_to_yaw=0.0, show_vid = True):
     # Функция управления моторами, принимает: time_control - время,
     # по умолчанию равное нулю, то есть работает один раз,
     # yaw_to_set - заданное значение курса,
@@ -228,6 +237,9 @@ def motor_control_regulator(time_control, yaw_to_set, depth_to_set, speed_to_yaw
         while time_new + time_control > time.time():
             keep_yaw(yaw_to_set, speed_to_yaw)
             keep_depth(depth_to_set)
+            if show_vid:
+                img = get_img(0)
+                view_img(img)
     else:
         keep_yaw(yaw_to_set, speed_to_yaw)
         keep_depth(depth_to_set)
@@ -299,19 +311,20 @@ def get_img(cam=0):
             return cap1.read()[1]
 
 
-def view_img(img1, Low_hsv, Max_hsv):
+def view_img(img1, Low_hsv = ..., Max_hsv = ...):
     # перевод изображения из RGB в HSV формат.
     imageHSV = cv2.cvtColor(img1, cv2.COLOR_BGR2HSV)
     # бинаризация изображения.
-    img_bin = cv2.inRange(imageHSV, Low_hsv, Max_hsv)
+    bin_spec = Low_hsv is not ... and Max_hsv is not ...
+    img_bin = cv2.inRange(imageHSV, Low_hsv, Max_hsv) if bin_spec else ...
     if SIMULATOR:
         cv2.imshow('Image', img1)
-        cv2.imshow('Bin', img_bin)
+        cv2.imshow('Bin', img_bin) if bin_spec else ...
 
         cv2.waitKey(1)
     else:
         mur_view.show(img1, 0)
-        mur_view.show(img_bin, 1)
+        mur_view.show(img_bin, 1) if bin_spec else ...
 
 
 def defining_arrow(image):  # вычесление угла у стрелки путём нахождения наибольшой стороны
@@ -325,7 +338,7 @@ def defining_arrow(image):  # вычесление угла у стрелки п
     if cnt:  # проверяем не пустой ли список контуров
         c = sorted(cnt, key=cv2.contourArea, reverse=True)[
             0]  # берём наибольшую маску
-        if cv2.contourArea(c) > 100:  # проверяем не мусор ли это
+        if cv2.contourArea(c) > 200:  # проверяем не мусор ли это
             c = cv2.convexHull(c)  # сглаживаем фигуру
             # аппроксимируем фигуры, (!!!)
             s_triangle, angle_arrow = cv2.minEnclosingTriangle(c)
@@ -360,18 +373,14 @@ def defining_arrow(image):  # вычесление угла у стрелки п
             # вычисдения кооринат середины наибольшой стороны треугольника
             x_centre_arrow = (coordinte[1][0] + coordinte[2][0]) // 2
             y_centre_arrow = (coordinte[1][1] + coordinte[2][1]) // 2
-            # вычесление векторов для расчёта угла стрелки
-            x1 = coordinte[0][0] - x_centre_arrow
-            y1 = coordinte[0][1] - y_centre_arrow
-            # вычесляем угол
-            angle = calculate_angle(x1, y1)
-            try:
-                # координаты центра стрелки
-                x = int(moments["m10"] / moments["m00"])
-                y = int(moments["m01"] / moments["m00"])
-                return x, y, angle, image  # данные угла для регулятора по курсу
-            except:
-                return False
+
+            center_x = int(moments["m10"] / moments["m00"])
+            center_y = int(moments["m01"] / moments["m00"])
+
+            angle = math.degrees(math.atan2(y_centre_arrow - center_y, x_centre_arrow - center_x)) - 90
+            angle = angle_correct(angle)
+
+            return center_x, center_y, angle, image  # данные угла для регулятора по курсу
     return False
 
 
@@ -457,9 +466,10 @@ def angle_score(yaw, score=10):
     angle_sum_c = 0
     while True:
         img0 = get_img()
+        print(img0.shape)
         data = defining_arrow(img0)
         view_img(data[3], Low_hsv_orange, Max_hsv_orange)
-        motor_control_regulator(0, yaw, 0.5, 0)
+        motor_control_regulator(0, yaw, DEPTH, 0, show_vid=False)
         if data:
             angle_sum += angle_correct(data[2])
             angle_sum_c += 1
@@ -492,13 +502,31 @@ def regul_angle_figure(yaw, hsv_min=Low_hsv_orange, hsv_max=Max_hsv_orange):
             data_ang = - \
                 calculate_angle_sin_vector(
                     160 - data[0], 120 - data[1]) + auv.get_yaw()
-            print(data_ang)
+            # print(data_ang)
             motor_control_regulator(0, data_ang, 0.5, 0)
             yaw = data_ang
             if regul_angle(data_ang, 30, 1):
                 return data_ang
         else:
             motor_control_regulator(0, yaw, 0.5, 0)
+
+def regul_angle_arrow(yaw,):
+    while True:
+        img = get_img()
+        img = cv2.resize(img, (320, 240))
+        view_img(img, *colors_dict['red'])
+        data = defining_arrow(img)
+        if data:
+            data_ang = - \
+                calculate_angle_sin_vector(
+                    160 - data[0], 120 - data[1]) + auv.get_yaw()
+            # print(data_ang)
+            motor_control_regulator(0, data_ang, DEPTH, 0)
+            yaw = data_ang
+            if regul_angle(data_ang, 30, 1):
+                return data_ang
+        else:
+            motor_control_regulator(0, yaw, DEPTH, 0)
 
 
 def regul_angle_figure_2(yaw):
@@ -518,7 +546,7 @@ def regul_angle_figure_2(yaw):
                 auv.set_rgb_color(0, 255, 0)
 #                 error = clamp(error, -255, -50)
             yaw = error
-            print(data[0], n_error)
+            # print(data[0], n_error)
             # motor_control_regulator(0, error + auv.get_yaw(), DEPTH, 0)
             keep_depth(DEPTH)
             keep_yaw(0, error=error)
@@ -540,10 +568,22 @@ def regul_r_figure(yaw, hsv_min=Low_hsv_orange, hsv_max=Max_hsv_orange):
     while True:
         img = get_img()
         img = cv2.resize(img, (320, 240))
+        view_img(img)
         data = defining_figure(img, hsv_min, hsv_max)
-        print(data)
+        # print(data)
         if data:
             if regul_distance(centering_r(yaw, data[1])):
+                return True
+
+
+def regul_r_arrow(yaw):
+    while True:
+        img = get_img()
+        img = cv2.resize(img, (320, 240))
+        data = defining_arrow(img)
+        view_img(img)
+        if data:
+            if regul_distance(centering_r(yaw, data[1], DEPTH)):
                 return True
 
 
@@ -553,17 +593,29 @@ def figure_search(yaw):
         img = cv2.resize(img, (320, 240))
         data = defining_figure(img, Low_hsv_orange, Max_hsv_orange)
         data2 = defining_figure(img, *colors_dict["red"])
+        # cv2.imshow("img", img)
+        # cv2.waitKey(1)
         motor_control_regulator(0, yaw, 0.5, 20)
         if data:
             return True
         if data2:
             return "red"
+        
+def try_find_figure():
+    img = get_img()
+    img = cv2.resize(img, (320, 240))
+    data = defining_arrow(img)
+    data2 = defining_figure(img, *colors_dict["red"])
+    view_img(img)
+    if data:
+        return True, 0
+    if data2:
+        return True, 1
+    return False, -1
 
 
 Yaw_const = auv.get_yaw()
 yaw = auv.get_yaw()
-
-DEPTH = 1
 
 if __name__ == '__main__':
     success = False
@@ -573,44 +625,61 @@ if __name__ == '__main__':
         time.sleep(4)
         Yaw_const = auv.get_yaw()
         auv.set_off_delay(0.5) if ROBOT else ...
-        motor_control_regulator(5, Yaw_const, DEPTH, 1)
+
+        motor_control_regulator(5, Yaw_const, DEPTH, 0)
         print("Starting main")
         auv.set_rgb_color(0, 255, 0) if ROBOT else ...
 
         yaw = regul_angle_figure(yaw, *colors_dict['red'])
         auv.set_rgb_color(0, 0, 255) if ROBOT else ...
-        print("Centered yaw")
+        print("Centered yaw on red circle")
 
         regul_r_figure(yaw, *colors_dict['red'])
         auv.set_rgb_color(39, 237, 201) if ROBOT else ...
 
-        print("Centered y")
-        yaw = angle_score(yaw)
+        print("Centered y on red circle")
 
+        yaw = auv.get_yaw()
         motor_control_regulator(5, yaw, DEPTH, 0)
-        auv.set_rgb_color(255, 255, 255) if ROBOT else ...
-        motor_control_regulator(4, yaw, DEPTH, 40)
+        print("Finding arrows")
+
+        go_forward = False
 
         while True:
-            res = figure_search(yaw)
+            keep_depth(DEPTH)
+            keep_yaw(yaw, 20 if go_forward else 0)
+            time.sleep(0.01)
 
-            if res == "red":
-                while True:
-                    keep_depth(-1)
+            f, obj = try_find_figure()
 
-            auv.set_rgb_color(0, 255, 0) if ROBOT else ...
-            yaw = regul_angle_figure(yaw)
-            auv.set_rgb_color(0, 0, 255) if ROBOT else ...
-            print("Centered yaw")
+            # if res == "red":
+            #     print("Finished")
+            #     while True:
+            #         keep_depth(-1)
 
-            regul_r_figure(yaw)
-            auv.set_rgb_color(39, 237, 201) if ROBOT else ...
-            print("Centered x")
-            yaw = angle_line_score(yaw)
+            if obj == 0:
+                print("Found arrow")
 
-            motor_control_regulator(5, yaw, DEPTH, 0)
-            auv.set_rgb_color(255, 255, 255) if ROBOT else ...
-            motor_control_regulator(4, yaw, DEPTH, 40)
+                auv.set_rgb_color(0, 255, 0) if ROBOT else ...
+                yaw = regul_angle_arrow(yaw)
+                auv.set_rgb_color(0, 0, 255) if ROBOT else ...
+                print("Centered yaw")
+
+                regul_r_arrow(yaw)
+                auv.set_rgb_color(39, 237, 201) if ROBOT else ...
+                print("Centered r")
+
+                DEPTH = 3
+                yaw = auv.get_yaw()
+                yaw = clamp_to180(yaw + angle_score(yaw))
+                print(yaw)
+
+                motor_control_regulator(5, yaw, DEPTH, 0)
+                auv.set_rgb_color(255, 255, 255) if ROBOT else ...
+                motor_control_regulator(4, yaw, DEPTH, 20)
+                
+                go_forward = True
+                
     finally:
         if not success:
             auv.set_rgb_color(255, 0, 0) if ROBOT else ...
